@@ -1,4 +1,5 @@
 example = function() {
+  library(pladj)
   # --- Setup --------------------------------------------------------------
   set.seed(123)
   suppressPackageStartupMessages({
@@ -302,8 +303,8 @@ partial_leverages.feols = function(
   use_stored_demeaned = TRUE
 ) {
   method = match.arg(method)
-  restore.point("partial_leverages.feols")
   if (!inherits(fit, "fixest")) stop("fit must be a fixest object from feols().")
+  library(fixest)
 
   # Which RHS? If IV, use the second-stage RHS
   rhs_type = if (!is.null(fit$fml_all) && !is.null(fit$fml_all$iv)) "iv.rhs2" else "rhs"

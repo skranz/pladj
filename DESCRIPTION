@@ -13,4 +13,4 @@ Description: Fast computation of PL matrices, interfaces with fixest and lm
 License: MIT
 Encoding: UTF-8
 LazyData: true
-Depends: fixest, restorepoint
+RoxygenNote: 7.2.3
