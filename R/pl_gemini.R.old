@@ -1,0 +1,188 @@
+example = function() {
+  # Load data from fixest package
+  data(trade)
+
+  # --- Example 1: Model with fixed-effects and weights ---
+  cat("--- Example 1: FE model with weights ---\n")
+  model_fe_w <- feols(
+    log(Euros) ~ log(dist_km) + Product | Origin + Destination,
+    data = trade,
+    weights = ~I(dist_km^(-1)) # Use inverse distance as weights
+  )
+
+  model_fe_w
+  # Compute partial leverages using the new wrapper
+  # Let's try the fast and stable Cholesky method
+  plev_fe_w <- partial_leverage.feols(model_fe_w, method = "chol")
+
+  # Print the first few rows and columns
+  print(head(plev_fe_w))
+
+  # Check the properties: columns should sum to 1
+  cat("\nColumn sums (should be ~1):\n")
+  print(colSums(plev_fe_w))
+
+
+  # --- Example 2: Simple OLS model without weights ---
+  cat("\n--- Example 2: Simple OLS model ---\n")
+  model_ols <- feols(log(Euros) ~ log(dist_km) + Product, data = trade)
+
+  plev_ols <- partial_leverage(model_ols, method = "qr")
+
+  print(head(plev_ols))
+  cat("\nColumn sums (should be ~1):\n")
+  print(colSums(plev_ols))
+
+
+  # --- Example 3: Direct matrix usage ---
+  cat("\n--- Example 3: Direct usage on a matrix ---\n")
+  X_matrix <- model.matrix(model_ols)
+  plev_matrix <- partial_leverage(X_matrix, method = "chol")
+
+  # Verify it gives the same result as the feols wrapper for OLS
+  all.equal(plev_ols, plev_matrix) # Should be TRUE
+}
+
+#' Compute Partial Leverages (Fast Core Engine)
+#'
+#' This is the core computational engine for calculating the N x K matrix of
+#' partial leverages. It uses an efficient algorithm based on the inverse of the
+#' cross-product matrix and supports weighted least squares.
+#'
+#' @param X An N x K numeric matrix of regressors. Should include an intercept.
+#' @param weights A numeric vector of weights of length N. If NULL (the default),
+#'   OLS is assumed (all weights are 1).
+#' @param method The matrix decomposition method used to compute the inverse of
+#'   the cross-product matrix.
+#'   - "crossprod": The default, uses `solve(crossprod(...))`.
+#'   - "chol": Uses the Cholesky decomposition. It's very fast and stable for
+#'     the symmetric, positive-definite matrices used here.
+#'   - "qr": Uses QR decomposition. Generally the most numerically stable.
+#' @param qr_X Optional. A pre-computed QR decomposition of the (weighted) X
+#'   matrix. If provided and `method = "qr"`, this will be used, saving time.
+#'
+#' @return An N x K matrix of partial leverages.
+#' @keywords internal
+partial_leverage_compute <- function(X, weights = NULL,
+                                     method = c("crossprod", "chol", "qr"),
+                                     qr_X = NULL) {
+  if (!is.matrix(X)) stop("X must be a matrix.")
+  method <- match.arg(method)
+
+  N <- nrow(X)
+  K <- ncol(X)
+
+  # --- Handle Weights ---
+  # If no weights, use uniform weights for simpler code logic
+  if (is.null(weights)) {
+    weights <- rep(1.0, N)
+    is_weighted <- FALSE
+  } else {
+    if (length(weights) != N) stop("Length of weights must equal nrow(X).")
+    is_weighted <- TRUE
+  }
+
+  # Initialize the results matrix
+  P <- matrix(0.0, nrow = N, ncol = K)
+  colnames(P) <- colnames(X)
+
+  # --- Step 1: Compute C = (X'WX)^-1 using the chosen method ---
+  C <- switch(
+    method,
+    crossprod = {
+      # Weighted crossproduct: t(X) %*% (weights * X)
+      XtWX <- crossprod(X, X * weights)
+      solve(XtWX)
+    },
+    chol = {
+      XtWX <- crossprod(X, X * weights)
+      # chol2inv is a fast and stable way to invert a symmetric pos-def matrix
+      chol2inv(chol(XtWX))
+    },
+    qr = {
+      if (!is.null(qr_X)) {
+        qr_X_w <- qr_X
+      } else {
+        # For QR, we must explicitly scale X by sqrt(weights)
+        X_w <- sqrt(weights) * X
+        qr_X_w <- qr(X_w)
+      }
+      if (qr_X_w$rank < K) stop("X is rank-deficient.")
+      # (X'WX)^-1 = ((R'Q'QR))^-1 = (R'R)^-1
+      chol2inv(qr.R(qr_X_w))
+    }
+  )
+
+  # --- Step 2: Loop to compute residuals and leverages for each regressor ---
+  for (k in 1:K) {
+    C_kk <- C[k, k]
+    if (C_kk < 1e-12) next # Avoid division by zero for collinear variables
+
+    # Calculate the residual vector X_k^* using elements of C.
+    # This formula holds for both OLS and WLS.
+    if (K > 1) {
+      X_k_star <- X[, k] + X[, -k, drop=FALSE] %*% (C[-k, k] / C_kk)
+    } else {
+      # Special case for K=1 (intercept-only or single regressor)
+      X_k_star <- X[, k] - weighted.mean(X[, k], w = weights)
+    }
+
+    # Formula for partial leverage in WLS: w_i * (X_ik^*)^2 * C_kk
+    P[, k] <- weights * (X_k_star^2) * C_kk
+  }
+
+  return(P)
+}
+
+#' Compute Partial Leverages
+#'
+#' A generic function to compute the N x K matrix of partial leverages from a
+#' model object or a matrix.
+#'
+#' @param model A model object (e.g., from `feols`) or a numeric matrix.
+#' @param ... Additional arguments passed to the specific method.
+#' @return An N x K matrix of partial leverages.
+#' @export
+partial_leverage <- function(model, ...) {
+  UseMethod("partial_leverage")
+}
+
+#' @describeIn partial_leverage Method for feols objects from the fixest package.
+#' @export
+partial_leverage.feols <- function(model, ...) {
+
+  # --- Step 1: Extract necessary components from the feols object ---
+
+  # Get the model matrix of regressors (excluding fixed effects)
+  # This uses the linear part of the formula stored in the model.
+  X <- model.matrix(model$fml_all$linear, model$data)
+
+  # Get weights (will be NULL if not used in the model)
+  weights <- model$weights
+
+  # --- Step 2: Demean the regressors by the fixed effects ---
+  # Partial leverage in a FE model is defined on the demeaned data.
+  # The fixest:::demean function is the efficient way to do this.
+  if (!is.null(model$fixef_id)) {
+    if(!requireNamespace("fixest", quietly = TRUE)) {
+        stop("Package 'fixest' must be installed to use this function.")
+    }
+    X_demeaned <- fixest:::demean(X = X, f = model$fixef_id, weights = weights)
+  } else {
+    X_demeaned <- X
+  }
+
+  # --- Step 3: Call the computational engine ---
+  # Pass the demeaned matrix, weights, and any other args (...)
+  partial_leverage_compute(X = X_demeaned, weights = weights, ...)
+}
+
+#' @describeIn partial_leverage Default method for a numeric matrix.
+#' @export
+partial_leverage.default <- function(model, ...) {
+  if (!is.matrix(model)) {
+    stop("Default method requires a numeric matrix for the 'model' argument.")
+  }
+  partial_leverage_compute(X = model, ...)
+}
+

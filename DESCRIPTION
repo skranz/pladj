@@ -1,0 +1,16 @@
+Package: pladj
+Type: Package
+Title: Partial leverage adjusted degrees of freedom as proposed by Kranz (2024)
+Version: 0.1.0
+Authors@R: c(
+    person(
+      "Sebastian", "Kranz",
+      email = "sebastian.kranz@uni-ulm.de",
+      role = c("aut", "cre")
+    )
+  )
+Description: Fast computation of PL matrices, interfaces with fixest and lm
+License: MIT
+Encoding: UTF-8
+LazyData: true
+Depends: fixest, restorepoint
